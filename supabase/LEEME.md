@@ -24,6 +24,13 @@
 6. En `app/src/main/java/com/taller/otalmacen/Supa.kt` reemplaza
    `PEGA_AQUI_EL_CLIENT_ID_WEB` por el ID de cliente **web** (termina en `.apps.googleusercontent.com`).
 
+## Almacenista restringido (solo modifica las OT que él subió)
+`esquema.sql` marca a `ixtac.remolques@tracsatlax.com.mx` con `solo_propias = true`. Ese almacenista ve todas
+las OT pero solo puede modificar o borrar las que él subió (la base de datos lo hace cumplir, no solo la app).
+Para restringir a otro: `update public.usuarios set solo_propias = true where email = 'correo@dominio.com';`
+Para quitar la restricción: `... set solo_propias = false ...`. Las OT que ya existían quedan a nombre de quien
+las modificó por última vez.
+
 ## 3. Almacenistas con correo y contraseña (opcional)
 Authentication > Users > Add user (marca "Auto Confirm User") y agrega el correo en `usuarios`
 con rol `almacenista` (ver el ejemplo comentado en `esquema.sql`). También pueden entrar con Google

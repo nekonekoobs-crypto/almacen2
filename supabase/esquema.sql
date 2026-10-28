@@ -28,6 +28,12 @@ insert into public.usuarios (email, rol, nombre) values
   ('shinne0188@gmail.com', 'almacenista', 'Almacenista 1')
 on conflict (email) do update set rol = 'almacenista';
 
+-- Almacenista restringido: solo puede modificar las OT que él mismo subió (ve todas las demás).
+alter table public.usuarios add column if not exists solo_propias boolean not null default false;
+insert into public.usuarios (email, rol, nombre, solo_propias)
+values ('ixtac.remolques@tracsatlax.com.mx', 'almacenista', 'Almacenista Ixtac', true)
+on conflict (email) do update set rol = 'almacenista', solo_propias = true;
+
 -- Más almacenistas (solo se pueden crear desde aquí, no desde la app):
 -- insert into public.usuarios (email, rol, nombre) values ('correo@gmail.com', 'almacenista', 'Almacenista 2');
 
@@ -114,20 +120,71 @@ create table if not exists public.ordenes (
   id              bigint primary key,
   datos           jsonb not null,
   actualizado     timestamptz not null default now(),
-  actualizado_por text
+  actualizado_por text,
+  creado_por      text
 );
+alter table public.ordenes add column if not exists creado_por text;
 
 create or replace function public.ordenes_sello() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   new.actualizado := now();
   new.actualizado_por := auth.jwt() ->> 'email';
+  -- El dueño de la OT es quien la subió; nunca cambia
+  if tg_op = 'INSERT' then
+    new.creado_por := lower(auth.jwt() ->> 'email');
+  else
+    new.creado_por := old.creado_por;
+  end if;
   return new;
 end $$;
 
 drop trigger if exists ordenes_sello on public.ordenes;
 create trigger ordenes_sello before insert or update on public.ordenes
   for each row execute function public.ordenes_sello();
+
+-- OT que ya existían: su dueño es quien las modificó por última vez (se apaga el sello para no alterar fechas)
+alter table public.ordenes disable trigger ordenes_sello;
+update public.ordenes set creado_por = lower(actualizado_por) where creado_por is null;
+alter table public.ordenes enable trigger ordenes_sello;
+
+-- ¿La persona conectada es un almacenista restringido (solo sus propias OT)?
+create or replace function public.mi_restringido() returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce(
+    (select solo_propias from public.usuarios where lower(email) = lower(auth.jwt() ->> 'email') limit 1),
+    false)
+$$;
+
+-- ¿Puede modificar esta OT? Almacenista sin restricción: sí. Restringido: solo si él la subió
+-- (o si la OT todavía no existe en la nube).
+create or replace function public.puede_editar_orden(p_id bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.mi_rol() = 'almacenista'
+     and (
+       not public.mi_restringido()
+       or not exists (select 1 from public.ordenes o where o.id = p_id)
+       or exists (
+         select 1 from public.ordenes o
+         where o.id = p_id and lower(o.creado_por) = lower(auth.jwt() ->> 'email')
+       )
+     )
+$$;
+
+-- Lo mismo para las fotos (la ruta es "id_de_la_OT/archivo.jpg")
+create or replace function public.puede_editar_foto(p_ruta text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select case when split_part(p_ruta, '/', 1) ~ '^[0-9]+$'
+              then public.puede_editar_orden(split_part(p_ruta, '/', 1)::bigint)
+              else false end
+$$;
+
+revoke all on function public.mi_restringido()            from public, anon;
+revoke all on function public.puede_editar_orden(bigint)  from public, anon;
+revoke all on function public.puede_editar_foto(text)     from public, anon;
+grant execute on function public.mi_restringido()            to authenticated;
+grant execute on function public.puede_editar_orden(bigint)  to authenticated;
+grant execute on function public.puede_editar_foto(text)     to authenticated;
 
 -- 5) Seguridad: quién puede ver y quién puede editar -------------------------
 alter table public.usuarios enable row level security;
@@ -153,18 +210,18 @@ create policy ordenes_ver on public.ordenes
 drop policy if exists ordenes_insertar on public.ordenes;
 create policy ordenes_insertar on public.ordenes
   for insert to authenticated
-  with check (public.mi_rol() = 'almacenista');
+  with check (public.puede_editar_orden(id));
 
 drop policy if exists ordenes_actualizar on public.ordenes;
 create policy ordenes_actualizar on public.ordenes
   for update to authenticated
-  using (public.mi_rol() = 'almacenista')
-  with check (public.mi_rol() = 'almacenista');
+  using (public.puede_editar_orden(id))
+  with check (public.puede_editar_orden(id));
 
 drop policy if exists ordenes_borrar on public.ordenes;
 create policy ordenes_borrar on public.ordenes
   for delete to authenticated
-  using (public.mi_rol() = 'almacenista');
+  using (public.puede_editar_orden(id));
 
 -- 6) Fotos de salida de almacén (espacio privado) ---------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -180,14 +237,14 @@ create policy fotos_ver on storage.objects
 drop policy if exists fotos_subir on storage.objects;
 create policy fotos_subir on storage.objects
   for insert to authenticated
-  with check (bucket_id = 'fotos' and public.mi_rol() = 'almacenista');
+  with check (bucket_id = 'fotos' and public.puede_editar_foto(name));
 
 drop policy if exists fotos_cambiar on storage.objects;
 create policy fotos_cambiar on storage.objects
   for update to authenticated
-  using (bucket_id = 'fotos' and public.mi_rol() = 'almacenista');
+  using (bucket_id = 'fotos' and public.puede_editar_foto(name));
 
 drop policy if exists fotos_borrar on storage.objects;
 create policy fotos_borrar on storage.objects
   for delete to authenticated
-  using (bucket_id = 'fotos' and public.mi_rol() = 'almacenista');
+  using (bucket_id = 'fotos' and public.puede_editar_foto(name));
