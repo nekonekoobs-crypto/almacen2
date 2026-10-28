@@ -33,7 +33,7 @@ object XlsxWriter {
         val campos = listOf(
             "SEGURO:" to o.seguro, "ELABORACIÓN:" to o.elaboracion, "ENTREGA:" to o.entrega,
             "OT:" to o.ot, "UNIDAD:" to o.unidad, "VIN:" to o.vin,
-            "MODELO:" to o.modelo, "TALLER:" to o.taller, "JEFE DE TALLER:" to o.jefeTaller
+            "MODELO:" to o.modelo, "RAZÓN SOCIAL:" to o.taller, "JEFE DE TALLER:" to o.jefeTaller
         )
         campos.forEachIndexed { i, (k, v) ->
             val r = i + 1
