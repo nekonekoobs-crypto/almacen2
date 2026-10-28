@@ -631,7 +631,7 @@ fun DetalleScreen(
         CampoUi(2) { CampoTexto("Unidad", orden.unidad) { v -> onCambio(orden.copy(unidad = v)) } },
         CampoUi(2) { CampoTexto("VIN", orden.vin) { v -> onCambio(orden.copy(vin = v.uppercase())) } },
         CampoUi(1) { CampoTexto("Modelo", orden.modelo) { v -> onCambio(orden.copy(modelo = v)) } },
-        CampoUi(1) { CampoTexto("Taller", orden.taller) { v -> onCambio(orden.copy(taller = v)) } },
+        CampoUi(1) { CampoTexto("Razón social", orden.taller) { v -> onCambio(orden.copy(taller = v)) } },
         CampoUi(2) { CampoTexto("Jefe de taller", orden.jefeTaller) { v -> onCambio(orden.copy(jefeTaller = v)) } }
     )
 
