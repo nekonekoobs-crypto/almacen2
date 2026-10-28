@@ -187,6 +187,13 @@ object Supa {
         }
     }
 
+    /** true si el almacenista solo puede modificar las OT que él subió; null si no se pudo saber. */
+    fun consultarRestringido(token: String): Boolean? {
+        val r = peticion("POST", "/rest/v1/rpc/mi_restringido", "{}".toByteArray(), token, JSON)
+        if (!r.ok) return null
+        return r.texto.trim() == "true"
+    }
+
     /**
      * Devuelve un token vigente y lo renueva si está por vencer.
      * Devuelve null si no hay sesión o no se pudo renovar (sin conexión): la sesión solo se borra

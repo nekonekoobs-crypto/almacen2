@@ -43,6 +43,34 @@ object Sync {
         prefs(ctx).edit().putString("sellos", j.toString()).apply()
     }
 
+    // ---------- Almacenista restringido: solo modifica las OT que él subió ----------
+    fun restringido(ctx: Context): Boolean = prefs(ctx).getBoolean("restringido", false)
+
+    private fun duenos(ctx: Context): JSONObject = try {
+        JSONObject(prefs(ctx).getString("duenos", "{}") ?: "{}")
+    } catch (e: Exception) {
+        JSONObject()
+    }
+
+    private fun guardarDuenos(ctx: Context, j: JSONObject) {
+        prefs(ctx).edit().putString("duenos", j.toString()).apply()
+    }
+
+    /** Correo de quien subió la OT ("" si no se sabe); null si la OT es nueva y aún no está en la nube. */
+    fun dueno(ctx: Context, id: Long): String? {
+        val d = duenos(ctx)
+        return if (d.has(id.toString())) d.optString(id.toString()) else null
+    }
+
+    /** ¿Esta persona puede modificar la OT? Lectores no; restringidos solo las suyas. */
+    fun puedeEditar(ctx: Context, id: Long): Boolean {
+        val s = Supa.sesion(ctx) ?: return false
+        if (s.rol != "almacenista") return false
+        if (!restringido(ctx)) return true
+        val d = dueno(ctx, id) ?: return true
+        return d.equals(s.email, ignoreCase = true)
+    }
+
     // ---------- Cambios locales pendientes ----------
     @Synchronized
     fun marcarPendiente(ctx: Context, id: Long) {
@@ -145,6 +173,10 @@ object Sync {
             }
         }
         val editor = rol == "almacenista"
+        if (bajar && editor) {
+            val rest = Supa.consultarRestringido(token)
+            if (rest != null) prefs(ctx).edit().putBoolean("restringido", rest).apply()
+        }
         if (bajar) {
             Supa.registrarAccesoSiToca(ctx, token)
             bajarTodo(ctx, editor)
@@ -208,19 +240,40 @@ object Sync {
                 quitar(ctx, "pendientes", idS)
                 continue
             }
+            // Una OT ajena no se sube (el servidor la rechazaría); se vuelve a bajar la versión de la nube
+            if (!puedeEditar(ctx, o.id)) {
+                quitar(ctx, "pendientes", idS)
+                val sl0 = sellos(ctx)
+                sl0.remove(idS)
+                guardarSellos(ctx, sl0)
+                continue
+            }
             val fila = JSONObject().put("id", o.id).put("datos", Store.toJson(o))
             val r = Supa.peticion(
-                "POST", "/rest/v1/ordenes?select=id,actualizado", fila.toString().toByteArray(), tk(ctx),
+                "POST", "/rest/v1/ordenes?select=id,actualizado,creado_por", fila.toString().toByteArray(), tk(ctx),
                 mapOf(
                     "Content-Type" to "application/json",
                     "Prefer" to "resolution=merge-duplicates,return=representation"
                 )
             )
+            if (r.codigo == 403) {
+                // Sin permiso para esta OT: se descarta el cambio local y se baja la versión de la nube
+                quitar(ctx, "pendientes", idS)
+                val sl1 = sellos(ctx)
+                sl1.remove(idS)
+                guardarSellos(ctx, sl1)
+                continue
+            }
             if (!r.ok) throw IllegalStateException(Supa.errorDe(r))
-            val sello = try {
-                JSONArray(r.texto).getJSONObject(0).optString("actualizado")
+            var sello = ""
+            try {
+                val fila0 = JSONArray(r.texto).getJSONObject(0)
+                sello = fila0.optString("actualizado")
+                val du = duenos(ctx)
+                du.put(idS, if (fila0.isNull("creado_por")) "" else fila0.getString("creado_por"))
+                guardarDuenos(ctx, du)
             } catch (e: Exception) {
-                ""
+                // se conserva lo que ya había
             }
             val fotosOk = subirFotos(ctx, o)
             val sl = sellos(ctx)
@@ -261,9 +314,10 @@ object Sync {
     // ---------- Bajar ----------
     private fun bajarTodo(ctx: Context, editor: Boolean) {
         val base = ctx.filesDir
-        val r = Supa.peticion("GET", "/rest/v1/ordenes?select=id,actualizado&order=id.desc", null, tk(ctx))
+        val r = Supa.peticion("GET", "/rest/v1/ordenes?select=id,actualizado,creado_por&order=id.desc", null, tk(ctx))
         if (!r.ok) throw IllegalStateException(Supa.errorDe(r))
         val lista = JSONArray(r.texto)
+        val du = duenos(ctx)
         val sl = sellos(ctx)
         val pend = conjunto(ctx, "pendientes")
         val sinc = conjunto(ctx, "sincronizadas")
@@ -274,6 +328,7 @@ object Sync {
             val f = lista.getJSONObject(i)
             val id = f.get("id").toString()
             enNube.add(id)
+            du.put(id, if (f.isNull("creado_por")) "" else f.getString("creado_por"))
             if (id in pend) continue
             if (sl.optString(id) != f.optString("actualizado") || Store.cargar(base, id.toLong()) == null) {
                 aBajar.add(id)
@@ -317,6 +372,7 @@ object Sync {
         }
         guardarConjunto(ctx, "sincronizadas", sinc)
         guardarSellos(ctx, sl)
+        guardarDuenos(ctx, du)
         anadirPendientes(ctx, nuevasPendientes)
 
         for (o in Store.loadAll(base)) bajarFotos(ctx, o)

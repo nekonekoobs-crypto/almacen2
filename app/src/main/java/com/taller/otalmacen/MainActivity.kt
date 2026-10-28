@@ -193,7 +193,11 @@ fun App(modo: Int, onModo: () -> Unit) {
         }
     }
 
+    /** Lectores no editan; un almacenista restringido solo edita las OT que él subió. */
+    fun puedeEditarOrden(o: Orden): Boolean = !soloLectura && Sync.puedeEditar(ctx, o.id)
+
     fun borrarOrden(o: Orden) {
+        if (!puedeEditarOrden(o)) return
         limpiarFotos(base, o, null)
         Store.delete(base, o.id)
         if (!soloLectura) {
@@ -233,7 +237,7 @@ fun App(modo: Int, onModo: () -> Unit) {
         val id = piezaFotoId
         val tipo = piezaFotoTipo
         val d = actual
-        if (ok && id != null && d != null) {
+        if (ok && id != null && d != null && puedeEditarOrden(d)) {
             val nombre = "${d.id}_${id}_${tipo}_${System.currentTimeMillis()}.jpg"
             val res = try {
                 guardarFoto(ctx, bajaFile, nombre)
@@ -364,6 +368,7 @@ fun App(modo: Int, onModo: () -> Unit) {
             },
             onAbrir = { actual = it },
             onBorrar = { borrarOrden(it) },
+            puedeBorrar = { puedeEditarOrden(it) },
             soloLectura = soloLectura,
             correo = ses.email,
             estado = estadoSync,
@@ -378,10 +383,12 @@ fun App(modo: Int, onModo: () -> Unit) {
             }
         )
     } else {
+        val editable = puedeEditarOrden(o)
+        CompositionLocalProvider(LocalSoloLectura provides !editable) {
         DetalleScreen(
             orden = o,
             onCambio = { n ->
-                if (!soloLectura) {
+                if (editable) {
                     guardar(n)
                     val quitadas = limpiarFotos(base, o, n)
                     Sync.marcarFotosPorBorrar(ctx, o.id, quitadas)
@@ -404,6 +411,7 @@ fun App(modo: Int, onModo: () -> Unit) {
             },
             onExportar = { exportar(ctx, o) }
         )
+        }
     }
     }
 }
@@ -449,6 +457,7 @@ fun ListaScreen(
     onNueva: () -> Unit,
     onAbrir: (Orden) -> Unit,
     onBorrar: (Orden) -> Unit,
+    puedeBorrar: (Orden) -> Boolean,
     soloLectura: Boolean,
     correo: String,
     estado: String,
@@ -586,10 +595,12 @@ fun ListaScreen(
                 Column(Modifier.padding(12.dp)) {
                     Text("OT ${o.ot.ifBlank { "(sin número)" }}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                     Text("${o.unidad} · ${o.seguro} · ${o.items.size} piezas")
-                    if (!soloLectura) {
+                    if (puedeBorrar(o)) {
                         Row {
                             TextButton(onClick = { porBorrar = o }) { Text("Borrar") }
                         }
+                    } else if (!soloLectura) {
+                        Text("Solo lectura: la subió otro almacenista", fontSize = 12.sp)
                     }
                 }
             }
