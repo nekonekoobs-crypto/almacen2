@@ -104,6 +104,23 @@ object Sync {
         guardarConjunto(ctx, "fotosPorBorrar", f)
     }
 
+    /** Una OT restaurada desde una copia de seguridad: se vuelve a subir, junto con sus fotos. */
+    @Synchronized
+    fun alRestaurar(ctx: Context, o: Orden) {
+        val porBorrar = conjunto(ctx, "fotosPorBorrar")
+        val subidas = conjunto(ctx, "fotosSubidas")
+        var cambioB = false
+        var cambioS = false
+        for (n in o.items.flatMap { it.fotos() }) {
+            val k = "${o.id}/$n"
+            if (porBorrar.remove(k)) cambioB = true
+            if (subidas.remove(k)) cambioS = true
+        }
+        if (cambioB) guardarConjunto(ctx, "fotosPorBorrar", porBorrar)
+        if (cambioS) guardarConjunto(ctx, "fotosSubidas", subidas)
+        marcarPendiente(ctx, o.id)
+    }
+
     @Synchronized
     private fun anadirPendientes(ctx: Context, ids: List<String>) {
         if (ids.isEmpty()) return
@@ -229,9 +246,14 @@ object Sync {
             guardarSellos(ctx, sl)
         }
         for (clave in conjunto(ctx, "fotosPorBorrar")) {
+            // Fotos nuevas: viven cifradas en Telegram (se borran con la función "fotos")
+            val rt = Supa.peticion("DELETE", "/functions/v1/fotos?ruta=" + Uri.encode(clave), null, tk(ctx))
+            // Fotos viejas: pudieron quedar en Supabase Storage
             val ruta = clave.split("/").joinToString("/") { Uri.encode(it) }
-            val r = Supa.peticion("DELETE", "/storage/v1/object/fotos/$ruta", null, tk(ctx))
-            if (r.ok || r.codigo == 404 || r.codigo == 400) quitar(ctx, "fotosPorBorrar", clave)
+            val rs = Supa.peticion("DELETE", "/storage/v1/object/fotos/$ruta", null, tk(ctx))
+            val tgListo = rt.ok || rt.codigo == 404 || rt.codigo == 400
+            val stListo = rs.ok || rs.codigo == 404 || rs.codigo == 400
+            if (tgListo && stListo) quitar(ctx, "fotosPorBorrar", clave)
         }
 
         for (idS in conjunto(ctx, "pendientes")) {
@@ -297,9 +319,10 @@ object Sync {
             if (clave in subidas) continue
             val f = File(dir, nombre)
             if (!f.exists()) continue
+            // La función "fotos" cifra la foto y la guarda en el chat privado de Telegram
             val r = Supa.peticion(
-                "POST", "/storage/v1/object/fotos/${o.id}/${Uri.encode(nombre)}", f.readBytes(), tk(ctx),
-                mapOf("Content-Type" to "image/jpeg", "x-upsert" to "true")
+                "POST", "/functions/v1/fotos?ruta=" + Uri.encode(clave), f.readBytes(), tk(ctx),
+                mapOf("Content-Type" to "application/octet-stream")
             )
             if (r.ok) {
                 subidas.add(clave)
@@ -385,9 +408,13 @@ object Sync {
             val f = File(dir, nombre)
             if (f.exists()) continue
             try {
-                val r = Supa.peticion(
-                    "GET", "/storage/v1/object/authenticated/fotos/${o.id}/${Uri.encode(nombre)}", null, tk(ctx)
-                )
+                var r = Supa.peticion("GET", "/functions/v1/fotos?ruta=" + Uri.encode("${o.id}/$nombre"), null, tk(ctx))
+                if (r.codigo == 404) {
+                    // Foto anterior al cambio: sigue en Supabase Storage
+                    r = Supa.peticion(
+                        "GET", "/storage/v1/object/authenticated/fotos/${o.id}/${Uri.encode(nombre)}", null, tk(ctx)
+                    )
+                }
                 if (r.ok && r.cuerpo.isNotEmpty()) f.writeBytes(r.cuerpo)
             } catch (e: IOException) {
                 // se intenta de nuevo en la siguiente sincronización
