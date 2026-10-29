@@ -9,6 +9,9 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -218,6 +221,48 @@ fun App(modo: Int, onModo: () -> Unit) {
         }
     }
 
+    /** Copia de seguridad: automática cada 15 días (forzar = false) o a pedido (forzar = true). */
+    fun respaldar(forzar: Boolean) {
+        Thread {
+            val msg = try {
+                if (forzar || Respaldo.toca(ctx)) Respaldo.crear(ctx) else null
+            } catch (e: Exception) {
+                "No se pudo hacer la copia de seguridad: " + (e.message ?: e.javaClass.simpleName)
+            }
+            if (msg != null) {
+                Handler(Looper.getMainLooper()).post { Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
+
+    // Al abrir la app (ya sincronizada) revisa si toca la copia de 15 días
+    LaunchedEffect(sesion?.email) {
+        if (sesion != null && !soloLectura) {
+            delay(20_000L)
+            respaldar(false)
+        }
+    }
+
+    var respaldoPend by remember { mutableStateOf<Pair<Uri, Respaldo.Resumen>?>(null) }
+    val selectorRespaldo = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            Thread {
+                val r = try {
+                    Respaldo.inspeccionar(ctx, uri)
+                } catch (e: Exception) {
+                    null
+                }
+                Handler(Looper.getMainLooper()).post {
+                    if (r == null) {
+                        Toast.makeText(ctx, "El archivo no es una copia de seguridad válida.", Toast.LENGTH_LONG).show()
+                    } else {
+                        respaldoPend = Pair(uri, r)
+                    }
+                }
+            }.start()
+        }
+    }
+
     val fotoFile = remember {
         val d = File(ctx.cacheDir, "fotos")
         d.mkdirs()
@@ -334,6 +379,53 @@ fun App(modo: Int, onModo: () -> Unit) {
     val ses = sesion
     val rev = revision
     val o = actual
+
+    val rp = respaldoPend
+    if (rp != null) {
+        AlertDialog(
+            onDismissRequest = { respaldoPend = null },
+            title = { Text("Cargar copia de seguridad") },
+            text = {
+                Text(
+                    "La copia trae ${rp.second.ordenes} OT y ${rp.second.fotos} fotos. Se agregan tal cual estaban; " +
+                        "las OT que ya existan se reemplazan por la versión de la copia. ¿Continuar?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    respaldoPend = null
+                    Toast.makeText(ctx, "Restaurando la copia…", Toast.LENGTH_SHORT).show()
+                    val subir = !soloLectura
+                    Thread {
+                        val res = try {
+                            Respaldo.restaurar(ctx, rp.first, subir)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        Handler(Looper.getMainLooper()).post {
+                            if (res == null) {
+                                Toast.makeText(ctx, "No se pudo restaurar la copia.", Toast.LENGTH_LONG).show()
+                            } else {
+                                ordenes = Store.loadAll(base)
+                                Toast.makeText(
+                                    ctx, "Se restauraron ${res.ordenes} OT y ${res.fotos} fotos.", Toast.LENGTH_LONG
+                                ).show()
+                                if (subir) {
+                                    Sync.programarEnvio(ctx) { r ->
+                                        estadoSync = r.mensaje
+                                        if (r.sinSesion) sesion = null
+                                    }
+                                }
+                            }
+                        }
+                    }.start()
+                }) { Text("Restaurar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { respaldoPend = null }) { Text("Cancelar") }
+            }
+        )
+    }
     CompositionLocalProvider(LocalSoloLectura provides soloLectura) {
     if (ses == null) {
         LoginScreen(onSesion = { sesion = it })
@@ -376,6 +468,10 @@ fun App(modo: Int, onModo: () -> Unit) {
             onActualizar = { sincronizar(true) },
             usuariosPendientes = usuariosPend,
             onUsuarios = { verUsuarios = true },
+            onRespaldoAhora = { respaldar(true) },
+            onCargarRespaldo = {
+                selectorRespaldo.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+            },
             onSalir = {
                 Supa.cerrarSesion(ctx)
                 sesion = null
@@ -465,6 +561,8 @@ fun ListaScreen(
     onActualizar: () -> Unit,
     usuariosPendientes: Int,
     onUsuarios: () -> Unit,
+    onRespaldoAhora: () -> Unit,
+    onCargarRespaldo: () -> Unit,
     onSalir: () -> Unit
 ) {
     val pal = paleta()
@@ -500,24 +598,17 @@ fun ListaScreen(
         item {
             Column {
                 Spacer(Modifier.height(28.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Órdenes de trabajo",
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onModo) {
-                        Text(
-                            when (modo) {
-                                1 -> "☀ Claro"
-                                2 -> "☾ Oscuro"
-                                else -> "◐ Auto"
-                            }
-                        )
-                    }
-                    LogoTracsa()
-                }
+                BarraMenu(
+                    hayMenu = !soloLectura,
+                    usuariosPendientes = usuariosPendientes,
+                    onUsuarios = onUsuarios,
+                    onFoto = onFoto,
+                    onGaleria = onGaleria,
+                    onNueva = onNueva,
+                    onArchivo = onArchivo,
+                    onCargarRespaldo = onCargarRespaldo,
+                    onRespaldoAhora = onRespaldoAhora
+                )
             }
         }
         item {
@@ -530,37 +621,20 @@ fun ListaScreen(
                     OutlinedButton(onClick = onActualizar, enabled = !sincronizando) { Text("Actualizar") }
                     Spacer(Modifier.width(8.dp))
                     TextButton(onClick = onSalir) { Text("Salir") }
-                }
-                if (!soloLectura) {
-                    OutlinedButton(onClick = onUsuarios, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (usuariosPendientes > 0) "Usuarios ($usuariosPendientes por aprobar)" else "Usuarios")
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onModo) {
+                        Text(
+                            when (modo) {
+                                1 -> "☀ Claro"
+                                2 -> "☾ Oscuro"
+                                else -> "◐ Auto"
+                            }
+                        )
                     }
                 }
                 if (sincronizando) Text("Sincronizando…", fontSize = 13.sp)
                 else if (estado.isNotBlank()) Text(estado, fontSize = 13.sp)
             }
-        }
-        if (!soloLectura) {
-        item {
-            Button(onClick = onFoto, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-                Text("Tomar foto de la OT", fontSize = 18.sp)
-            }
-        }
-        item {
-            OutlinedButton(onClick = onGaleria, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                Text("Elegir foto de la galería")
-            }
-        }
-        item {
-            OutlinedButton(onClick = onArchivo, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                Text("Importar archivo (Excel, PDF, Word)")
-            }
-        }
-        item {
-            OutlinedButton(onClick = onNueva, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                Text("Nueva OT vacía")
-            }
-        }
         }
         item {
             OutlinedTextField(
@@ -606,6 +680,74 @@ fun ListaScreen(
             }
         }
     }
+}
+
+/** Barra superior con el menú desplegable (☰) y el logo a la derecha. */
+@Composable
+fun BarraMenu(
+    hayMenu: Boolean,
+    usuariosPendientes: Int,
+    onUsuarios: () -> Unit,
+    onFoto: () -> Unit,
+    onGaleria: () -> Unit,
+    onNueva: () -> Unit,
+    onArchivo: () -> Unit,
+    onCargarRespaldo: () -> Unit,
+    onRespaldoAhora: () -> Unit
+) {
+    val pal = paleta()
+    var abierto by remember { mutableStateOf(false) }
+    Surface(
+        color = pal.gris,
+        contentColor = pal.texto,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                if (hayMenu) {
+                    TextButton(
+                        onClick = { abierto = !abierto },
+                        colors = ButtonDefaults.textButtonColors(contentColor = pal.texto)
+                    ) {
+                        Text(if (abierto) "✕" else "☰", fontSize = 24.sp)
+                    }
+                }
+                Text(
+                    "Órdenes de trabajo",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp)
+                )
+                LogoTracsa()
+            }
+            if (abierto && hayMenu) {
+                Spacer(Modifier.fillMaxWidth().height(1.dp).background(pal.texto.copy(alpha = 0.15f)))
+                ItemMenu(
+                    if (usuariosPendientes > 0) "👤 Dar de alta usuarios ($usuariosPendientes por aprobar)"
+                    else "👤 Dar de alta usuarios"
+                ) { abierto = false; onUsuarios() }
+                ItemMenu("📷 Tomar foto") { abierto = false; onFoto() }
+                ItemMenu("🖼 Elegir foto de galería") { abierto = false; onGaleria() }
+                ItemMenu("➕ Nueva OT") { abierto = false; onNueva() }
+                ItemMenu("📂 Importar archivos (Excel, PDF, Word)") { abierto = false; onArchivo() }
+                ItemMenu("♻ Cargar copias de seguridad") { abierto = false; onCargarRespaldo() }
+                ItemMenu("💾 Hacer copia de seguridad ahora") { abierto = false; onRespaldoAhora() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ItemMenu(texto: String, onClick: () -> Unit) {
+    Text(
+        texto,
+        fontSize = 16.sp,
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 16.dp, vertical = 14.dp)
+    )
 }
 
 @Composable
