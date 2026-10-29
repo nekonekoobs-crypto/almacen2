@@ -20,7 +20,7 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 /**
- * Copias de seguridad locales: un .zip con todas las OT (ordenes/*.json) y sus fotos (fotos_baja/*),
+ * Copias de seguridad locales: un .zip con todas las OT (carpeta ordenes, archivos .json) y sus fotos (carpeta fotos_baja),
  * comprimido al máximo. Se guarda en Descargas/OT TRACSA (sobrevive aunque se desinstale la app).
  */
 object Respaldo {
