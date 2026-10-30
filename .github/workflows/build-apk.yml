@@ -21,6 +21,10 @@ jobs:
           gradle-version: "8.9"
 
       - name: Compilar APK debug
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_FOTOS_KEY: ${{ secrets.TG_FOTOS_KEY }}
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Renombrar APK
