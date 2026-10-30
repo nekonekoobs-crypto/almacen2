@@ -279,11 +279,14 @@ fun App(modo: Int, onModo: () -> Unit) {
     }
     var piezaFotoId by remember { mutableStateOf<Long?>(null) }
     var piezaFotoTipo by remember { mutableStateOf("baja") }
-    val camaraBaja = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+    var elegirOrigenFoto by remember { mutableStateOf(false) }
+
+    /** Comprime y guarda la foto que está en bajaFile (tomada con la cámara o copiada de la galería). */
+    fun guardarFotoDePieza() {
         val id = piezaFotoId
         val tipo = piezaFotoTipo
         val d = actual
-        if (ok && id != null && d != null && puedeEditarOrden(d)) {
+        if (id != null && d != null && puedeEditarOrden(d)) {
             val nombre = "${d.id}_${id}_${tipo}_${System.currentTimeMillis()}.jpg"
             val res = try {
                 guardarFoto(ctx, bajaFile, nombre)
@@ -303,6 +306,23 @@ fun App(modo: Int, onModo: () -> Unit) {
             } else {
                 mensaje = "No se pudo guardar la foto."
             }
+        }
+    }
+
+    val camaraBaja = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        if (ok) guardarFotoDePieza()
+    }
+    val galeriaPieza = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            val copiada = try {
+                ctx.contentResolver.openInputStream(uri)?.use { entrada ->
+                    bajaFile.outputStream().use { salida -> entrada.copyTo(salida) }
+                }
+                true
+            } catch (e: Exception) {
+                false
+            }
+            if (copiada) guardarFotoDePieza() else mensaje = "No se pudo leer la foto de la galería."
         }
     }
 
@@ -380,6 +400,26 @@ fun App(modo: Int, onModo: () -> Unit) {
     val ses = sesion
     val rev = revision
     val o = actual
+
+    if (elegirOrigenFoto) {
+        AlertDialog(
+            onDismissRequest = { elegirOrigenFoto = false },
+            title = { Text("Agregar foto") },
+            text = { Text("¿Cómo quieres agregarla?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    elegirOrigenFoto = false
+                    camaraBaja.launch(bajaUri)
+                }) { Text("📷 Tomar foto") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    elegirOrigenFoto = false
+                    galeriaPieza.launch("image/*")
+                }) { Text("🖼 Elegir de galería") }
+            }
+        )
+    }
 
     val rp = respaldoPend
     if (rp != null) {
@@ -511,7 +551,7 @@ fun App(modo: Int, onModo: () -> Unit) {
             onFotoPieza = { p, tipo ->
                 piezaFotoId = p.id
                 piezaFotoTipo = tipo
-                camaraBaja.launch(bajaUri)
+                elegirOrigenFoto = true
             },
             onExportar = { exportar(ctx, o) }
         )
