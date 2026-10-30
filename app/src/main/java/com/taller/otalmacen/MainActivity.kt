@@ -20,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.size
@@ -461,6 +462,13 @@ fun App(modo: Int, onModo: () -> Unit) {
             onAbrir = { actual = it },
             onBorrar = { borrarOrden(it) },
             puedeBorrar = { puedeEditarOrden(it) },
+            onBaja = { x, v ->
+                val ultima = Store.cargar(base, x.id) ?: x
+                if (puedeEditarOrden(ultima)) {
+                    guardar(ultima.copy(baja = v))
+                    ordenes = Store.loadAll(base)
+                }
+            },
             soloLectura = soloLectura,
             correo = ses.email,
             estado = estadoSync,
@@ -554,6 +562,7 @@ fun ListaScreen(
     onAbrir: (Orden) -> Unit,
     onBorrar: (Orden) -> Unit,
     puedeBorrar: (Orden) -> Boolean,
+    onBaja: (Orden, Boolean) -> Unit,
     soloLectura: Boolean,
     correo: String,
     estado: String,
@@ -568,6 +577,7 @@ fun ListaScreen(
     val pal = paleta()
     var busqueda by remember { mutableStateOf("") }
     var porBorrar by remember { mutableStateOf<Orden?>(null) }
+    var pedirBaja by remember { mutableStateOf<Pair<Orden, Boolean>?>(null) }
     val filtradas = if (busqueda.isBlank()) ordenes
     else ordenes.filter { it.coincide(busqueda) }
 
@@ -587,6 +597,30 @@ fun ListaScreen(
             },
             dismissButton = {
                 TextButton(onClick = { porBorrar = null }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    val pb = pedirBaja
+    if (pb != null) {
+        val nombreOt = pb.first.ot.ifBlank { "(sin número)" }
+        AlertDialog(
+            onDismissRequest = { pedirBaja = null },
+            title = { Text(if (pb.second) "Marcar OT como baja" else "Quitar la baja de la OT") },
+            text = {
+                Text(
+                    if (pb.second) "¿Estás seguro de marcar la OT $nombreOt como BAJA? Se pondrá en rojo."
+                    else "¿Estás seguro de quitar la baja de la OT $nombreOt?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onBaja(pb.first, pb.second)
+                    pedirBaja = null
+                }) { Text(if (pb.second) "Sí, marcar baja" else "Sí, quitar baja") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pedirBaja = null }) { Text("Cancelar") }
             }
         )
     }
@@ -661,22 +695,65 @@ fun ListaScreen(
             item { Text("No hay OT que coincidan con la búsqueda.") }
         }
         items(filtradas, key = { it.id }) { o ->
+            val fondoOt = if (o.baja) pal.rojo else pal.gris
+            val txtOt = colorSobre(fondoOt)
+            val editable = puedeBorrar(o)
             Card(
                 onClick = { onAbrir(o) },
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = pal.gris, contentColor = pal.texto)
+                colors = CardDefaults.cardColors(containerColor = fondoOt, contentColor = txtOt)
             ) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("OT ${o.ot.ifBlank { "(sin número)" }}", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "OT ${o.ot.ifBlank { "(sin número)" }}" + if (o.baja) " · BAJA" else "",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
                     Text("${o.unidad} · ${o.seguro} · ${o.items.size} piezas")
-                    if (puedeBorrar(o)) {
-                        Row {
-                            TextButton(onClick = { porBorrar = o }) { Text("Borrar") }
+                    ConteoOt(o, pal, txtOt)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Casilla("Baja de OT", o.baja, editable, txtOt, fondoOt) { v -> pedirBaja = Pair(o, v) }
+                        Spacer(Modifier.weight(1f))
+                        if (editable) {
+                            TextButton(
+                                onClick = { porBorrar = o },
+                                colors = ButtonDefaults.textButtonColors(contentColor = txtOt)
+                            ) { Text("Borrar") }
                         }
-                    } else if (!soloLectura) {
+                    }
+                    if (!editable && !soloLectura) {
                         Text("Solo lectura: la subió otro almacenista", fontSize = 12.sp)
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Totales de piezas por estado de una OT: altas, bajas, préstamos, devoluciones y sobrantes. */
+@Composable
+private fun ConteoOt(o: Orden, pal: Paleta, txt: Color) {
+    val datos = listOf(
+        Triple("Altas", o.items.count { it.alta }, pal.verde),
+        Triple("Bajas", o.items.count { it.baja }, pal.rojo),
+        Triple("Prést.", o.items.count { it.prestamo }, pal.amarillo),
+        Triple("Devol.", o.items.count { it.devolucion }, pal.azul),
+        Triple("Sobr.", o.items.count { it.sobrante }, pal.cafe)
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+        for ((etiqueta, cantidad, color) in datos) {
+            val t = colorSobre(color)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(color)
+                    .border(1.dp, txt.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .padding(vertical = 4.dp)
+            ) {
+                Text(cantidad.toString(), fontSize = 15.sp, fontWeight = FontWeight.Bold, color = t)
+                Text(etiqueta, fontSize = 10.sp, maxLines = 1, color = t)
             }
         }
     }
@@ -778,6 +855,7 @@ fun DetalleScreen(
     )
 
     var busq by remember { mutableStateOf("") }
+    var encAbierto by remember { mutableStateOf(true) }
     var fotoAmpliada by remember { mutableStateOf<String?>(null) }
     var porBorrarPieza by remember { mutableStateOf<Item?>(null) }
     val visibles = if (busq.isBlank()) orden.items
@@ -866,7 +944,23 @@ fun DetalleScreen(
                 }
             }
         }
-        item { EncabezadoResponsivo(campos) }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (encAbierto) "Encabezado" else "OT ${orden.ot.ifBlank { "(sin número)" }} · ${orden.unidad}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(onClick = { encAbierto = !encAbierto }) {
+                        Text(if (encAbierto) "▲ Ocultar" else "▼ Mostrar")
+                    }
+                }
+                if (encAbierto) EncabezadoResponsivo(campos)
+            }
+        }
         item {
             OutlinedTextField(
                 value = busq,

@@ -52,7 +52,8 @@ data class Orden(
     val modelo: String = "",
     val taller: String = "",
     val jefeTaller: String = "",
-    val items: List<Item> = emptyList()
+    val items: List<Item> = emptyList(),
+    val baja: Boolean = false   // OT dada de baja (se ve roja en la lista)
 )
 
 object Store {
@@ -120,6 +121,7 @@ object Store {
             .put("taller", o.taller)
             .put("jefeTaller", o.jefeTaller)
             .put("items", arr)
+            .put("baja", o.baja)
     }
 
     fun fromJson(j: JSONObject): Orden {
@@ -154,7 +156,8 @@ object Store {
             modelo = j.optString("modelo"),
             taller = j.optString("taller"),
             jefeTaller = j.optString("jefeTaller"),
-            items = items
+            items = items,
+            baja = j.optBoolean("baja", false)
         )
     }
 }
