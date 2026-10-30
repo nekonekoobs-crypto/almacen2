@@ -43,6 +43,35 @@ object Sync {
         prefs(ctx).edit().putString("sellos", j.toString()).apply()
     }
 
+    // ---------- Fotos en Telegram: nombre de la foto -> "file_id|id del mensaje" ----------
+    private fun tgMapa(ctx: Context): JSONObject = try {
+        JSONObject(prefs(ctx).getString("tgMapa", "{}") ?: "{}")
+    } catch (e: Exception) {
+        JSONObject()
+    }
+
+    private fun guardarTgMapa(ctx: Context, j: JSONObject) {
+        prefs(ctx).edit().putString("tgMapa", j.toString()).apply()
+    }
+
+    /** Aprende de qué archivo de Telegram es cada foto de una OT que bajó de la nube. */
+    @Synchronized
+    private fun absorberFotosTg(ctx: Context, idOrden: String, tg: JSONObject?) {
+        if (tg == null) return
+        val m = tgMapa(ctx)
+        var cambio = false
+        val nombres = tg.keys()
+        while (nombres.hasNext()) {
+            val n = nombres.next()
+            val clave = "$idOrden/$n"
+            if (!m.has(clave) && tg.optString(n).isNotEmpty()) {
+                m.put(clave, tg.optString(n))
+                cambio = true
+            }
+        }
+        if (cambio) guardarTgMapa(ctx, m)
+    }
+
     // ---------- Almacenista restringido: solo modifica las OT que él subió ----------
     fun restringido(ctx: Context): Boolean = prefs(ctx).getBoolean("restringido", false)
 
@@ -108,16 +137,11 @@ object Sync {
     @Synchronized
     fun alRestaurar(ctx: Context, o: Orden) {
         val porBorrar = conjunto(ctx, "fotosPorBorrar")
-        val subidas = conjunto(ctx, "fotosSubidas")
         var cambioB = false
-        var cambioS = false
         for (n in o.items.flatMap { it.fotos() }) {
-            val k = "${o.id}/$n"
-            if (porBorrar.remove(k)) cambioB = true
-            if (subidas.remove(k)) cambioS = true
+            if (porBorrar.remove("${o.id}/$n")) cambioB = true
         }
         if (cambioB) guardarConjunto(ctx, "fotosPorBorrar", porBorrar)
-        if (cambioS) guardarConjunto(ctx, "fotosSubidas", subidas)
         marcarPendiente(ctx, o.id)
     }
 
@@ -246,14 +270,18 @@ object Sync {
             guardarSellos(ctx, sl)
         }
         for (clave in conjunto(ctx, "fotosPorBorrar")) {
-            // Fotos nuevas: viven cifradas en Telegram (se borran con la función "fotos")
-            val rt = Supa.peticion("DELETE", "/functions/v1/fotos?ruta=" + Uri.encode(clave), null, tk(ctx))
+            // Fotos cifradas en Telegram: se intenta borrar el mensaje y se olvida su archivo
+            val m = tgMapa(ctx)
+            val dato = m.optString(clave)
+            if (dato.isNotEmpty()) {
+                Telegram.borrar(dato.substringAfter("|", "0").toLongOrNull() ?: 0L)
+                m.remove(clave)
+                guardarTgMapa(ctx, m)
+            }
             // Fotos viejas: pudieron quedar en Supabase Storage
             val ruta = clave.split("/").joinToString("/") { Uri.encode(it) }
             val rs = Supa.peticion("DELETE", "/storage/v1/object/fotos/$ruta", null, tk(ctx))
-            val tgListo = rt.ok || rt.codigo == 404 || rt.codigo == 400
-            val stListo = rs.ok || rs.codigo == 404 || rs.codigo == 400
-            if (tgListo && stListo) quitar(ctx, "fotosPorBorrar", clave)
+            if (rs.ok || rs.codigo == 404 || rs.codigo == 400) quitar(ctx, "fotosPorBorrar", clave)
         }
 
         for (idS in conjunto(ctx, "pendientes")) {
@@ -270,7 +298,17 @@ object Sync {
                 guardarSellos(ctx, sl0)
                 continue
             }
-            val fila = JSONObject().put("id", o.id).put("datos", Store.toJson(o))
+            // Primero las fotos (cifradas, a Telegram); la OT lleva anotado qué archivo es cada foto
+            val fotosOk = subirFotos(ctx, o)
+            val datos = Store.toJson(o)
+            val mt = tgMapa(ctx)
+            val tg = JSONObject()
+            for (n in o.items.flatMap { it.fotos() }) {
+                val v = mt.optString("${o.id}/$n")
+                if (v.isNotEmpty()) tg.put(n, v)
+            }
+            datos.put("fotosTg", tg)
+            val fila = JSONObject().put("id", o.id).put("datos", datos)
             val r = Supa.peticion(
                 "POST", "/rest/v1/ordenes?select=id,actualizado,creado_por", fila.toString().toByteArray(), tk(ctx),
                 mapOf(
@@ -297,7 +335,6 @@ object Sync {
             } catch (e: Exception) {
                 // se conserva lo que ya había
             }
-            val fotosOk = subirFotos(ctx, o)
             val sl = sellos(ctx)
             sl.put(idS, sello)
             guardarSellos(ctx, sl)
@@ -309,25 +346,23 @@ object Sync {
         }
     }
 
+    /** Sube a Telegram (cifradas) las fotos que todavía no están. true si todas quedaron arriba. */
     private fun subirFotos(ctx: Context, o: Orden): Boolean {
         var todoBien = true
-        val subidas = conjunto(ctx, "fotosSubidas")
         val dir = File(ctx.filesDir, "fotos_baja")
-        val nombres = o.items.flatMap { it.fotos() }
-        for (nombre in nombres) {
+        for (nombre in o.items.flatMap { it.fotos() }) {
             val clave = "${o.id}/$nombre"
-            if (clave in subidas) continue
+            if (tgMapa(ctx).has(clave)) continue
             val f = File(dir, nombre)
             if (!f.exists()) continue
-            // La función "fotos" cifra la foto y la guarda en el chat privado de Telegram
-            val r = Supa.peticion(
-                "POST", "/functions/v1/fotos?ruta=" + Uri.encode(clave), f.readBytes(), tk(ctx),
-                mapOf("Content-Type" to "application/octet-stream")
-            )
-            if (r.ok) {
-                subidas.add(clave)
-                guardarConjunto(ctx, "fotosSubidas", subidas)
-            } else {
+            try {
+                val a = Telegram.subir(clave, f.readBytes())
+                synchronized(this) {
+                    val m = tgMapa(ctx)
+                    m.put(clave, a.fileId + "|" + a.mensajeId)
+                    guardarTgMapa(ctx, m)
+                }
+            } catch (e: Exception) {
                 todoBien = false
             }
         }
@@ -366,9 +401,11 @@ object Sync {
             val arr = JSONArray(rr.texto)
             for (i in 0 until arr.length()) {
                 val f = arr.getJSONObject(i)
-                val o = Store.fromJson(f.getJSONObject("datos"))
+                val datos = f.getJSONObject("datos")
+                val o = Store.fromJson(datos)
                 Store.save(base, o)
                 val id = f.get("id").toString()
+                absorberFotosTg(ctx, id, datos.optJSONObject("fotosTg"))
                 sl.put(id, f.optString("actualizado"))
                 sinc.add(id)
             }
@@ -408,15 +445,19 @@ object Sync {
             val f = File(dir, nombre)
             if (f.exists()) continue
             try {
-                var r = Supa.peticion("GET", "/functions/v1/fotos?ruta=" + Uri.encode("${o.id}/$nombre"), null, tk(ctx))
-                if (r.codigo == 404) {
+                val dato = tgMapa(ctx).optString("${o.id}/$nombre")
+                if (dato.isNotEmpty()) {
+                    // Foto cifrada en Telegram: se baja y se descifra aquí
+                    val bytes = Telegram.bajar(dato.substringBefore("|"), "${o.id}/$nombre")
+                    if (bytes.isNotEmpty()) f.writeBytes(bytes)
+                } else {
                     // Foto anterior al cambio: sigue en Supabase Storage
-                    r = Supa.peticion(
+                    val r = Supa.peticion(
                         "GET", "/storage/v1/object/authenticated/fotos/${o.id}/${Uri.encode(nombre)}", null, tk(ctx)
                     )
+                    if (r.ok && r.cuerpo.isNotEmpty()) f.writeBytes(r.cuerpo)
                 }
-                if (r.ok && r.cuerpo.isNotEmpty()) f.writeBytes(r.cuerpo)
-            } catch (e: IOException) {
+            } catch (e: Exception) {
                 // se intenta de nuevo en la siguiente sincronización
             }
         }
